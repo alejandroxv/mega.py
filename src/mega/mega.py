@@ -413,6 +413,22 @@ class Mega:
         else:
             raise ValidationError('File id and key must be present')
 
+    def delete_folder_link(self, file):
+        try:
+            file = file[1]
+        except (IndexError, KeyError):
+            pass
+        if 'h' in file and 'k' in file:
+            public_handle = self._api_request({'a': 's2', 'n': file['h'], 's':[{'u': "EXP", 'r': ""}],'ha':''})
+            if public_handle == -11:
+                raise RequestError("Can't remove a public link from that file "
+                                   "(is this a shared file?)")
+            decrypted_key = a32_to_base64(file['shared_folder_key'])
+            return (f'{self.schema}://{self.domain}'
+                    f'/#F!{public_handle}!{decrypted_key}')
+        else:
+            raise ValidationError('File id and key must be present')
+
     def get_user(self):
         user_data = self._api_request({'a': 'ug'})
         return user_data
@@ -629,6 +645,59 @@ class Mega:
         self._api_request(request_body)
         nodes = self.get_files()
         return self.get_folder_link(nodes[node_id])
+
+    def delete_link(self, path=None, node_id=None):
+        nodes = self.get_files()
+        if node_id:
+            node = nodes[node_id]
+        else:
+            node = self.find(path)
+
+        node_data = self._node_data(node)
+        is_file_node = node_data['t'] == 0
+        if is_file_node:
+            return self._export_file(node)
+        if node:
+            try:
+                # If already exported
+                return self.delete_folder_link(node)
+            except (RequestError, KeyError):
+                pass
+
+        master_key_cipher = AES.new(a32_to_str(self.master_key), AES.MODE_ECB)
+        ha = base64_url_encode(
+            master_key_cipher.encrypt(node_data['h'].encode("utf8") +
+                                      node_data['h'].encode("utf8")))
+
+        share_key = secrets.token_bytes(16)
+        ok = base64_url_encode(master_key_cipher.encrypt(share_key))
+
+        share_key_cipher = AES.new(share_key, AES.MODE_ECB)
+        node_key = node_data['k']
+        encrypted_node_key = base64_url_encode(
+            share_key_cipher.encrypt(a32_to_str(node_key)))
+
+        node_id = node_data['h']
+        request_body = [{
+            'a':
+            's2',
+            'n':
+            node_id,
+            's': [{
+                'u': 'EXP',
+                'r': 0
+            }],
+            'i':
+            self.request_id,
+            'ok':
+            ok,
+            'ha':
+            ha,
+            'cr': [[node_id], [node_id], [0, 0, encrypted_node_key]]
+        }]
+        self._api_request(request_body)
+        nodes = self.get_files()
+        return self.delete_folder_link(nodes[node_id])
 
     def download_url(self, url, dest_path=None, dest_filename=None):
         """
